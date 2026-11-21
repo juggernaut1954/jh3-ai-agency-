@@ -2,7 +2,7 @@ services:
   - type: web
     name: jh3-agency-dashboard
     runtime: docker
-    plan: starter
+    plan: free
     healthCheckPath: /health
     envVars:
       - key: SESSION_SECRET
@@ -10,5 +10,4 @@ services:
       - key: ADMIN_PASSWORD
         sync: false
       - key: JH3_DB
-        value: /data/agency.db
-    
+        value: /tmp/agency.db
