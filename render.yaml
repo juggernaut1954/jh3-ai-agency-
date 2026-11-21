@@ -11,7 +11,4 @@ services:
         sync: false
       - key: JH3_DB
         value: /data/agency.db
-    disk:
-      name: agency-data
-      mountPath: /data
-      sizeGB: 1
+    
