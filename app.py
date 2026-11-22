@@ -188,7 +188,7 @@ def api_reply(data:ReplyIn):
     # Explicit opt-out requests override AI classification.
   opt_out_phrases = (
    'unsubscribe',
-   'remove me'
+   'remove me',
    'remove us',
    'take me off',
    'take us off',
