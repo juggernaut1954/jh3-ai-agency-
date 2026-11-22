@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from html import escape
 from urllib.parse import urlparse
+from discovery import MARKETS, INDUSTRIES, discover, DiscoveryError
 
 ROOT=Path(__file__).parent
 DB=Path(os.getenv('JH3_DB',str(ROOT/'agency.db')))
@@ -194,6 +195,50 @@ def api_lead(data:LeadIn):
 @app.get('/api/leads')
 def api_leads():
  with connect() as c:return [dict(r) for r in c.execute('SELECT * FROM leads ORDER BY score DESC,id DESC')]
+@app.get('/api/discovery/options')
+def discovery_options():
+ return {'markets':[{'id':k,'label':v['label']} for k,v in MARKETS.items()],
+         'industries':[{'id':k,'label':v['label']} for k,v in INDUSTRIES.items()],
+         'provider':'OpenStreetMap / Overpass', 'automatic_import':False}
+
+@app.get('/api/discovery/preview')
+def discovery_preview(market:str,industry:str,limit:int=20):
+ try:candidates=discover(market,industry,limit)
+ except ValueError as e:raise HTTPException(400,str(e))
+ except DiscoveryError as e:raise HTTPException(503,str(e))
+ with connect() as c:
+  for candidate in candidates:
+   duplicate=find_duplicate(c,candidate)
+   candidate['existing_lead_id']=duplicate['id'] if duplicate else None
+   candidate['existing_status']=duplicate['status'] if duplicate else None
+ return {'candidates':candidates,'count':len(candidates),
+         'notice':'Research candidates only. Review public source and details before importing. No emails sent.'}
+
+class DiscoveryImport(BaseModel):
+ name:str
+ industry:str
+ city:str=''
+ state:str=''
+ website:str=''
+ email:str=''
+ notes:str=''
+ source:str
+
+@app.post('/api/discovery/import')
+def discovery_import(data:DiscoveryImport):
+ # Require an OSM listing source, not an arbitrary external link.
+ if not re.fullmatch(r'https://www\.openstreetmap\.org/(node|way|relation)/[0-9]+',data.source):
+  raise HTTPException(400,'Invalid OpenStreetMap source')
+ if not data.name.strip() or not data.industry.strip():
+  raise HTTPException(400,'Business name and industry required')
+ d=data.model_dump()
+ d['notes']=(d['notes'][:700]+'\nSource: '+d['source'])[:950]
+ try:
+  with connect() as c:
+   lead_id=add_lead(c,d)
+  return {'id':lead_id,'status':'imported','note':'Imported after human review; contact details unverified'}
+ except ValueError as e:raise HTTPException(409,str(e))
+
 @app.post('/api/leads/{lead_id}/draft')
 def make_draft(lead_id:int):
  with connect() as c:
