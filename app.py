@@ -185,6 +185,26 @@ def api_reply(data:ReplyIn):
   if not data.body.strip():raise HTTPException(400,'Empty reply')
   label,reason=ai_classify(data.body) if os.getenv('OPENAI_API_KEY') else classify(data.body)
   cur=c.execute('INSERT INTO replies(lead_id,body,classification,reason,created) VALUES(?,?,?,?,?)',(data.lead_id,data.body,label,reason,now()))
+    # Explicit opt-out requests override AI classification.
+  opt_out_phrases = (
+   'unsubscribe',
+   'remove me'
+   'remove us',
+   'take me off',
+   'take us off',
+   'stop emailing',
+   'stop contacting',
+   'do not contact',
+   "don't contact",
+   'no more emails',
+   'do not email',
+   "don't email",
+   'opt out',
+   'opt-out',
+  )
+  if any(phrase in data.body.lower() for phrase in opt_out_phrases):
+   label='do_not_contact'
+   reason='Explicit opt-out request detected'
   # An earlier opt-out is permanent unless explicitly cleared by an administrator.
   if lead['status']=='do_not_contact':label='do_not_contact';reason='Prior opt-out remains in effect'
   c.execute('UPDATE leads SET status=? WHERE id=?',(label,data.lead_id))
