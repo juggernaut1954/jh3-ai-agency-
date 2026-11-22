@@ -180,18 +180,30 @@ def find_duplicate(c, data):
     return None
   
 def add_lead(c,data):
- d={k:str(data.get(k,'') or '').strip() for k in ['name','industry','city','state','website','email','notes']}
- if not d['name'] or not d['industry']:raise ValueError('name and industry required')
- if d['email'] and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',d['email']):raise ValueError('invalid email')
- duplicate_id = find_duplicate(c, d)
-if duplicate_id is not None:
-    raise ValueError(
-        f'Duplicate prospect: existing lead ID {duplicate_id}'
+    d={k:str(data.get(k,'') or '').strip() for k in ['name','industry','city','state','website','email','notes']}
+
+    if not d['name'] or not d['industry']:
+        raise ValueError('name and industry required')
+
+    if d['email'] and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',d['email']):
+        raise ValueError('invalid email')
+
+    duplicate_id = find_duplicate(c, d)
+    if duplicate_id is not None:
+        raise ValueError(
+            f'Duplicate prospect: existing lead ID {duplicate_id}'
+        )
+
+    score=lead_score(d)
+
+    cur=c.execute(
+        'INSERT INTO leads(name,industry,city,state,website,email,notes,score,created) VALUES(?,?,?,?,?,?,?,?,?)',
+        (*[d[k] for k in ['name','industry','city','state','website','email','notes']],score,now())
     )
- score=lead_score(d)
- cur=c.execute('INSERT INTO leads(name,industry,city,state,website,email,notes,score,created) VALUES(?,?,?,?,?,?,?,?,?)',(*[d[k] for k in ['name','industry','city','state','website','email','notes']],score,now()))
- audit(c,'lead_created',f'{cur.lastrowid} score={score}')
- return cur.lastrowid
+
+    audit(c,'lead_created',f'{cur.lastrowid} score={score}')
+    return cur.lastrowid
+
 class LeadIn(BaseModel):
  name:str;industry:str;city:str='';state:str='';website:str='';email:str='';notes:str=''
 class ReplyIn(BaseModel):
