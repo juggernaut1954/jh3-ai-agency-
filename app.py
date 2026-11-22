@@ -136,6 +136,49 @@ def ai_classify(body):
   return label,str(obj.get('reason','AI classification; human review required'))[:300]
  except (ValueError,KeyError,TypeError):raise HTTPException(502,'AI returned an invalid classification; nothing saved')
 
+from urllib.parse import urlparse
+
+def normalized_domain(website):
+    website = (website or '').strip().lower()
+    if not website:
+        return ''
+    parsed = urlparse(
+        website if '://' in website else 'https://' + website
+    )
+    host = (parsed.hostname or '').lower().rstrip('.')
+    if host.startswith('www.'):
+        host = host[4:]
+    return host
+
+def normalized_name(value):
+    return re.sub(r'\s+', ' ', (value or '').strip()).casefold()
+
+def find_duplicate(c, data):
+    name = normalized_name(data.get('name'))
+    city = normalized_name(data.get('city'))
+    state = normalized_name(data.get('state'))
+    domain = normalized_domain(data.get('website'))
+
+    rows = c.execute(
+        'SELECT id,name,city,state,website,status FROM leads'
+    )
+
+    for row in rows:
+        existing_domain = normalized_domain(row['website'])
+
+        if domain and existing_domain and domain == existing_domain:
+            return row['id']
+
+        if (
+            name and city and state
+            and name == normalized_name(row['name'])
+            and city == normalized_name(row['city'])
+            and state == normalized_name(row['state'])
+        ):
+            return row['id']
+
+    return None
+  
 def add_lead(c,data):
  d={k:str(data.get(k,'') or '').strip() for k in ['name','industry','city','state','website','email','notes']}
  if not d['name'] or not d['industry']:raise ValueError('name and industry required')
