@@ -1,21 +1,26 @@
-"""Small, human-reviewed OSM discovery adapter. No database writes or emails."""
+"""Human-reviewed OpenStreetMap discovery. No database writes or emails.
+
+Public Overpass instances are best-effort, not a guaranteed commercial SLA.
+"""
 import json
+import logging
 import re
 import time
-from urllib.request import Request, urlopen
-from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
-USER_AGENT = 'JHIII-Agent1-Discovery/0.1 (manual research; contact: info@jh3mining.com)'
-# Bounding boxes: south, west, north, east. Approximate metro search windows.
+logger = logging.getLogger(__name__)
+OVERPASS_URLS = (
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+)
+USER_AGENT = 'JHIII-Agent1-Discovery/0.2 (manual research; contact: info@jh3mining.com)'
 MARKETS = {
     'huntsville-al': {'label': 'Huntsville, Alabama', 'bbox': (34.60, -86.80, 34.85, -86.45)},
     'nw-arkansas': {'label': 'Northwest Arkansas', 'bbox': (36.00, -94.30, 36.45, -93.95)},
     'greenville-sc': {'label': 'Greenville, South Carolina', 'bbox': (34.75, -82.55, 34.98, -82.25)},
 }
-# Only supported OSM tag/value combinations are queried. Additional industries
-# can be added without changing the API or dashboard.
 INDUSTRIES = {
     'hvac': {'label': 'HVAC', 'filters': [('craft', 'hvac'), ('craft', 'air_conditioning')]},
     'plumbing': {'label': 'Plumbing', 'filters': [('craft', 'plumber')]},
@@ -28,15 +33,16 @@ INDUSTRIES = {
 }
 _cache = {}
 CACHE_SECONDS = 900
+_failure_until = 0.0
+COOLDOWN_SECONDS = 60
 
 class DiscoveryError(Exception):
     pass
 
 def _query(market, industry):
     bbox = ','.join(str(v) for v in MARKETS[market]['bbox'])
-    clauses = []
-    for key, value in INDUSTRIES[industry]['filters']:
-        clauses.append(f'  nwr["{key}"="{value}"]({bbox});')
+    clauses = [f'  nwr["{key}"="{value}"]({bbox});'
+               for key, value in INDUSTRIES[industry]['filters']]
     return '[out:json][timeout:18];\n(\n' + '\n'.join(clauses) + '\n);\nout center tags 120;'
 
 def _website(tags):
@@ -58,7 +64,6 @@ def _candidate(item, market, industry):
         return None
     city = (tags.get('addr:city') or MARKETS[market]['label'].split(',')[0]).strip()
     state = {'huntsville-al':'Alabama', 'nw-arkansas':'Arkansas', 'greenville-sc':'South Carolina'}[market]
-    # Northwest Arkansas is regional: never pretend every listing is in a city named 'Northwest Arkansas'.
     if market == 'nw-arkansas' and not tags.get('addr:city'):
         city = ''
     website = _website(tags)
@@ -71,7 +76,24 @@ def _candidate(item, market, industry):
             'source':source, 'source_type':'OpenStreetMap',
             'notes':f'Public OSM listing: {source}. Contact information unverified.'}
 
+def _fetch(url, payload):
+    req = Request(url, data=payload,
+                  headers={'User-Agent': USER_AGENT,
+                           'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+                  method='POST')
+    with urlopen(req, timeout=25) as response:
+        if response.status != 200:
+            raise DiscoveryError(f'Upstream HTTP {response.status}')
+        raw = response.read(2_000_001)
+        if len(raw) > 2_000_000:
+            raise DiscoveryError('Upstream response exceeded 2 MB')
+        body = json.loads(raw)
+        if not isinstance(body, dict) or not isinstance(body.get('elements'), list):
+            raise DiscoveryError('Invalid upstream response structure')
+        return body
+
 def discover(market, industry, limit=20):
+    global _failure_until
     if market not in MARKETS or industry not in INDUSTRIES:
         raise ValueError('Unsupported market or industry')
     if not isinstance(limit, int) or not 1 <= limit <= 50:
@@ -79,28 +101,38 @@ def discover(market, industry, limit=20):
     key = (market, industry)
     cached = _cache.get(key)
     if cached and time.monotonic() - cached[0] < CACHE_SECONDS:
-        results = cached[1]
-    else:
-        payload = urlencode({'data':_query(market, industry)}).encode('utf-8')
-        req = Request(OVERPASS_URL, data=payload,
-                      headers={'User-Agent':USER_AGENT, 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},
-                      method='POST')
+        return cached[1][:limit]
+    if time.monotonic() < _failure_until:
+        raise DiscoveryError('Public data service temporarily unavailable; wait one minute before retrying')
+
+    payload = urlencode({'data': _query(market, industry)}).encode('utf-8')
+    body = None
+    for url in OVERPASS_URLS:
         try:
-            with urlopen(req, timeout=23) as response:
-                if response.status != 200:
-                    raise DiscoveryError('Public data service unavailable; try later')
-                raw = response.read(2_000_001)
-                if len(raw) > 2_000_000:
-                    raise DiscoveryError('Public data response too large')
-                body = json.loads(raw)
-        except (HTTPError, URLError, TimeoutError, ValueError, OSError) as exc:
-            raise DiscoveryError('Public data service unavailable or rate-limited; try later') from exc
-        results = []
-        seen = set()
-        for item in body.get('elements', []):
-            c = _candidate(item, market, industry)
-            if c and c['source'] not in seen:
-                seen.add(c['source'])
-                results.append(c)
-        _cache[key] = (time.monotonic(), results)
+            body = _fetch(url, payload)
+            logger.info('Discovery provider succeeded: %s', url)
+            break
+        except HTTPError as exc:
+            logger.warning('Discovery provider HTTP %s: %s', exc.code, url)
+            if exc.code in (429, 403):
+                # Respect throttling/denial rather than switching providers to evade it.
+                _failure_until = time.monotonic() + COOLDOWN_SECONDS
+                raise DiscoveryError('Public data provider refused or rate-limited the request; retry later') from exc
+        except (URLError, TimeoutError, OSError, ValueError, DiscoveryError) as exc:
+            logger.warning('Discovery provider failed (%s): %s: %s',
+                           type(exc).__name__, url, str(exc)[:250])
+    if body is None:
+        _failure_until = time.monotonic() + COOLDOWN_SECONDS
+        raise DiscoveryError('Public data service unavailable; check Render logs for provider details')
+
+    results = []
+    seen = set()
+    for item in body['elements']:
+        if not isinstance(item, dict):
+            continue
+        candidate = _candidate(item, market, industry)
+        if candidate and candidate['source'] not in seen:
+            seen.add(candidate['source'])
+            results.append(candidate)
+    _cache[key] = (time.monotonic(), results)
     return results[:limit]
