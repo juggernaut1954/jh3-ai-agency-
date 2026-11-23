@@ -29,7 +29,7 @@ REJECT = {'wikipedia.org', 'albright.edu', 'albrightsupply.com', 'albrightintern
 STOPWORDS = {
     'llc', 'inc', 'corp', 'corporation', 'company', 'co', 'the', 'and',
     'of', 'services', 'service', 'heating', 'cooling', 'air', 'conditioning',
-    'hvac', 'mechanical', 'contractors', 'contractor', 'dba', 'pros',
+    'hvac', 'mechanical', 'contractors', 'contractor', 'dba', 'pros', 'associated', 'advanced', 'central', 'general', 'quality', 'best', 'professional',
 }
 HVAC_RE = re.compile(r'heat(?:ing)?|cool(?:ing)?|hvac|air[ -]?condition|furnace|mechanical|refrigerat', re.I)
 AL_RE = re.compile(r'\balabama\b|\bAL\s*\d{5}\b|\bbirmingham\b|\bhuntsville\b|\bmontgomery\b|\btuscaloosa\b|\bmobile,?\s*al\b', re.I)
@@ -203,6 +203,10 @@ def candidate_score(name, title, url):
         reasons.append('Multiple distinctive name terms matched')
     if len(wanted) >= 2 and len(overlap) == 1:
         reasons.append('Only one distinctive name term matched; requires stronger site evidence')
+    if not HVAC_RE.search(title + ' ' + host):
+        return -100, ['No HVAC evidence in search title/domain']
+    if len(wanted) >= 2 and len(overlap) < 2:
+        return 0, ['Insufficient distinctive name overlap']
     return score, reasons
 
 

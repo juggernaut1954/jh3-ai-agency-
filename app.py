@@ -359,14 +359,14 @@ async def upload_licenses(file:UploadFile=File(...)):
 
 
 # Research results are evidence-backed and separate from the sales-lead pipeline.
-from research import search_candidates, search_candidates_detailed, audit_site, identity_evidence
+from research import search_candidates, audit_site, identity_evidence
 
 class LicenseResearchIn(BaseModel):
  license_number:str
  website:str=''
 
 @app.get('/api/research/licenses')
-def research_license_candidates(limit:int=30):
+def research_license_candidates(limit:int=200):
  limit=max(1,min(limit,100))
  with connect() as c:
   rows=[dict(r) for r in c.execute("SELECT license_number,holder,business_name,license_type,status FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ?",(limit,))]
@@ -387,39 +387,33 @@ def research_find(data:LicenseResearchIn):
   item['match_status']=item['identity_check']['status']
  return {'license_number':data.license_number,'business_name':r['business_name'],'possible_websites':urls,'notice':'Unverified search results. Select only a website that actually belongs to this business.','error':error}
 
-class AutoResearchIn(BaseModel):
-  limit:int=20
-  offset:int=0
+class AutoResearchRequest(BaseModel):
+ limit:int=20
+ offset:int=0
 
 @app.post('/api/research/auto')
-def research_auto(data:AutoResearchIn):
-  """Search staged active HVAC licensees without manually supplied websites.
-
-  Results are research candidates, not independently verified prospects.
-  Does not import leads, send emails, or overwrite previous research.
-  """
-  limit=max(1,min(data.limit,20))
-  offset=max(0,data.offset)
-  with connect() as c:
-    rows=[dict(r) for r in c.execute("SELECT license_number,business_name,license_type,status FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ? OFFSET ?",(limit,offset))]
-  results=[]
-  for row in rows:
-    search=search_candidates_detailed(row['business_name'])
-    candidates=[]
-    for candidate in search['candidates'][:3]:
-      identity=identity_evidence(row['business_name'],candidate['url'])
-      candidates.append({**candidate,'identity':identity})
-    status=search['status']
-    if candidates:
-      if any(c['identity']['status']=='NEEDS_REVIEW' for c in candidates):
-        status='IDENTITY_EVIDENCE_FOUND_REVIEW_REQUIRED'
-      elif all(c['identity']['status']=='UNCONFIRMED' for c in candidates):
-        status='WEBSITE_IDENTITY_UNCONFIRMED'
-    results.append({'license_number':row['license_number'],
-                    'business_name':row['business_name'], 'status':status,
-                    'candidates':candidates,'diagnostics':search['diagnostics']})
-  return {'results':results,'count':len(results),'offset':offset,
-          'notice':'No website or business identity is independently verified. Review candidate evidence and confirm licensed company identity before importing as a prospect. No emails sent.'}
+def research_auto(data:AutoResearchRequest):
+ """Small batches reduce timeouts. Search hits are NOT verified leads."""
+ from research import search_candidates_detailed
+ limit=max(1,min(data.limit,20))
+ offset=max(0,data.offset)
+ with connect() as c:
+  rows=[dict(r) for r in c.execute(
+   "SELECT license_number,business_name FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ? OFFSET ?",
+   (limit,offset))]
+ results=[]
+ for row in rows:
+  found=search_candidates_detailed(row['business_name'])
+  checked=[]
+  for item in found['candidates'][:2]:
+   evidence=identity_evidence(row['business_name'],item['url'])
+   checked.append({**item,'identity':evidence})
+  results.append({'license_number':row['license_number'],
+                  'business_name':row['business_name'],
+                  'status':('REVIEW_REQUIRED' if checked else found['status']),
+                  'candidates':checked,'diagnostics':found['diagnostics']})
+ return {'count':len(results),'offset':offset,'next_offset':offset+len(results),
+         'results':results,'notice':'Search candidates only. No independently verified businesses or automatic lead imports.'}
 
 @app.post('/api/research/audit')
 def research_audit(data:LicenseResearchIn):
@@ -429,7 +423,8 @@ def research_audit(data:LicenseResearchIn):
  if r['status']!='ACTIVE' or r['license_type']!='HVAC' or not r['business_name'].strip():raise HTTPException(409,'Not an active named HVAC license')
  if not data.website.strip():raise HTTPException(400,'Choose or enter a verified business website')
  identity=identity_evidence(r['business_name'],data.website.strip())
- if identity['status']=='REJECTED':raise HTTPException(422,'Website does not match licensed HVAC business: '+'; '.join(identity['reasons'])[:150])
+ if identity['status'] in ('REJECTED','UNCONFIRMED'):
+  raise HTTPException(422,'Website identity not sufficiently supported: '+'; '.join(identity.get('reasons',[]))[:150])
  try:report=audit_site(data.website.strip())
  except Exception as e:raise HTTPException(422,'Website audit unavailable: '+str(e)[:180])
  # Score is a research-priority heuristic, NOT an assertion of poor performance.
