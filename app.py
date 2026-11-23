@@ -411,6 +411,45 @@ def research_audit(data:LicenseResearchIn):
   audit(c,'license_website_audited',data.license_number)
  return report
 
+@app.post('/api/research/auto')
+def research_auto(data:LicenseResearchIn):
+ """Research one staged license per request to avoid long-running batch timeouts."""
+ with connect() as c:
+  r=c.execute('SELECT business_name,holder,status,license_type FROM license_records WHERE license_number=?',(data.license_number,)).fetchone()
+ if not r:raise HTTPException(404,'License not staged')
+ if r['status']!='ACTIVE' or r['license_type']!='HVAC' or not r['business_name'].strip():
+  raise HTTPException(409,'Not an active named HVAC license')
+ name=r['business_name'].strip()
+ candidates,warning=search_candidates(name)
+ attempts=[]
+ for item in candidates[:4]:
+  url=item['url']
+  evidence=identity_evidence(name,url)
+  if evidence['status']!='NEEDS_REVIEW' or not all(evidence.get(k) for k in ('name_match','industry_match','location_match')):
+   attempts.append({'url':url,'reason':'Identity evidence insufficient','identity':evidence})
+   continue
+  try:
+   report=audit_site(url)
+   # The audit must be for the exact same site as the independent identity check.
+   if normalized_domain(report['website'])!=normalized_domain(evidence.get('final_url')):
+    attempts.append({'url':url,'reason':'Audited site differs from identity-checked site'});continue
+   signals=report['signals']
+   score=25+15*bool(report['phones'])+10*bool(report['emails'])+10*bool(report['contact_links'])+10*bool(report['booking_links'])+10*bool(signals['contact_form'])+10*bool(signals['mobile_viewport'])+10*bool(signals['social_profiles_linked'])
+   report.update(research_completeness_score=min(100,score),business_name_from_license=name,
+                 identity_match='NEEDS_REVIEW: human must confirm website belongs to licensed company',
+                 identity_evidence=evidence,discovery_source='automated public search',
+                 search_candidate=item,search_warning=warning)
+   with connect() as c:
+    prev=c.execute('SELECT license_number FROM license_research WHERE license_number=?',(data.license_number,)).fetchone()
+    if prev:c.execute('UPDATE license_research SET website=?,checked_at=?,report=? WHERE license_number=?',(report['website'],report['checked_at'],json.dumps(report),data.license_number))
+    else:c.execute('INSERT INTO license_research(license_number,website,checked_at,report) VALUES(?,?,?,?)',(data.license_number,report['website'],report['checked_at'],json.dumps(report)))
+    audit(c,'license_auto_researched',data.license_number)
+   return {'status':'RESEARCHED_NEEDS_REVIEW','license_number':data.license_number,'business_name':name,'report':report,'attempts':attempts}
+  except Exception as exc:
+   attempts.append({'url':url,'reason':'Audit failed: '+type(exc).__name__})
+ return {'status':'NO_CONFIDENT_MATCH','license_number':data.license_number,'business_name':name,
+         'attempts':attempts,'search_warning':warning,'note':'No website was accepted or saved. Manual investigation needed.'}
+
 @app.get('/api/research/export.csv')
 def research_export():
  with connect() as c:rows=[dict(r) for r in c.execute('SELECT l.license_number,l.business_name,l.status,r.website,r.checked_at,r.report FROM license_records l JOIN license_research r ON r.license_number=l.license_number ORDER BY r.checked_at DESC')]
