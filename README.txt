@@ -1,26 +1,11 @@
-JH III Agent 1 - coverage and website enrichment update
+Agent 1 batch research patch — safe integration
 
-Deploy together on version-3-testing: app.py, index.html, discovery.py.
-Dockerfile already copies these files; leave security.py and database untouched.
+Do not upload install_batch20.py to Render or run it in the Render container.
+1. Download the EXACT app.py and index.html from the GitHub branch Render deploys.
+2. Put them in one folder with install_batch20.py and run: python install_batch20.py
+3. Upload the patched app.py, index.html and the included research.py to that SAME branch.
+4. Commit; confirm Render deploys that commit.
+5. Use the new "Research A-list automatically" button. Keep the page open; requests run sequentially.
+6. Review the evidence for each candidate. No prospect is independently verified automatically; no outreach or lead import occurs.
 
-Changes:
-- Additional OSM category tags and removal of arbitrary 120-element output cap.
-- Contact completeness ranking; captures phone numbers from public OSM tags.
-- Optional Check website button for HTTPS business homepages already listed in OSM.
-- Reads at most 100 KB, five-second timeout, no redirects, public-IP checks.
-- Extracts only mailto: and tel: links on homepage, not guessed emails.
-- Keeps human-reviewed import, duplicate prevention, opt-outs and source attribution.
-
-Limitations:
-- Still uses OSM/Overpass only; independent Overture Maps integration is a future phase.
-- A website without HTTPS is not crawled. Website contacts are unverified.
-- Homepage-only; does not crawl contact pages, social networks, or search engines.
-- Free OSM data may remain sparse for HVAC. 20 results is a target, not a promise.
-- URL/IP checks mitigate SSRF but are not a complete network sandbox.
-
-Test:
-1. Commit three files and wait for Render Deploy live.
-2. Search Huntsville HVAC 20; inspect results.
-3. For a result with a listed HTTPS website, tap Check website.
-4. Review its source and contact details before import.
-5. Verify duplicate and opt-out protections remain effective.
+Caveats: Public Bing RSS may return zero candidates or rate-limit; slow calls may exceed Render free-tier limits. This is a bounded prototype, not a guaranteed 20-prospect output. Staged licenses must exist in the database. The browser retains batch progress only while the page stays open. Candidate names and phone/email are public-web observations, not confirmed ownership or deliverability. No verification-code bypass.
