@@ -6,7 +6,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py security.py index.html discovery.py ./
+COPY app.py security.py index.html discovery.py research.py ./
 
 RUN mkdir -p /data
 
