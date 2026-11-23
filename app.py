@@ -60,6 +60,15 @@ def init():
 CREATE TABLE IF NOT EXISTS drafts(id INTEGER PRIMARY KEY,lead_id INTEGER NOT NULL,kind TEXT NOT NULL,subject TEXT DEFAULT '',body TEXT NOT NULL,status TEXT DEFAULT 'pending',created TEXT NOT NULL,FOREIGN KEY(lead_id) REFERENCES leads(id));
 CREATE TABLE IF NOT EXISTS replies(id INTEGER PRIMARY KEY,lead_id INTEGER NOT NULL,body TEXT NOT NULL,classification TEXT NOT NULL,reason TEXT NOT NULL,created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,event TEXT NOT NULL,details TEXT NOT NULL,created TEXT NOT NULL);""")
+ if DATABASE_URL:
+  with connect() as c:
+   c.execute("CREATE TABLE IF NOT EXISTS license_records(id BIGSERIAL PRIMARY KEY,license_number TEXT NOT NULL UNIQUE,holder TEXT NOT NULL,license_type TEXT NOT NULL,status TEXT NOT NULL,issue_date TEXT DEFAULT '',expiration_date TEXT DEFAULT '',renewal_date TEXT DEFAULT '',business_name TEXT DEFAULT '',search_letter TEXT DEFAULT '',page_number TEXT DEFAULT '',updated TEXT NOT NULL)")
+ else:
+  with connect() as c:
+   c.execute("CREATE TABLE IF NOT EXISTS license_records(id INTEGER PRIMARY KEY,license_number TEXT NOT NULL UNIQUE,holder TEXT NOT NULL,license_type TEXT NOT NULL,status TEXT NOT NULL,issue_date TEXT DEFAULT '',expiration_date TEXT DEFAULT '',renewal_date TEXT DEFAULT '',business_name TEXT DEFAULT '',search_letter TEXT DEFAULT '',page_number TEXT DEFAULT '',updated TEXT NOT NULL)")
+ with connect() as c:
+  if DATABASE_URL:c.execute("CREATE TABLE IF NOT EXISTS license_research(license_number TEXT PRIMARY KEY,website TEXT NOT NULL,checked_at TEXT NOT NULL,report TEXT NOT NULL)")
+  else:c.execute("CREATE TABLE IF NOT EXISTS license_research(license_number TEXT PRIMARY KEY,website TEXT NOT NULL,checked_at TEXT NOT NULL,report TEXT NOT NULL)")
 # Retry transient database connectivity errors at startup, but fail visibly
 # rather than silently writing to a temporary SQLite database.
 for attempt in range(5):
@@ -317,6 +326,97 @@ async def import_csv(file:UploadFile=File(...)):
    try:add_lead(c,row);count+=1
    except ValueError as e:errors.append(f'Row {i}: {e}')
  return {'imported':count,'errors':errors[:20]}
+@app.post('/api/licenses/upload')
+async def upload_licenses(file:UploadFile=File(...)):
+ raw=await file.read()
+ if len(raw)>2_000_000:raise HTTPException(413,'License CSV too large')
+ try:
+  rows=list(csv.DictReader(io.StringIO(raw.decode('utf-8-sig'))))
+ except Exception:raise HTTPException(400,'Invalid CSV')
+ required={'license_number','holder','license_type','status','issue_date','expiration_date','renewal_date','business_name','search_letter','page_number'}
+ if not rows or not required.issubset(rows[0]):raise HTTPException(400,'Missing collector CSV columns')
+ if len(rows)>3000:raise HTTPException(413,'Maximum 3000 rows per upload')
+ inserted=0;updated=0;skipped=0;errors=[]
+ with connect() as c:
+  for n,r in enumerate(rows,2):
+   number=(r.get('license_number') or '').strip()
+   holder=(r.get('holder') or '').strip()
+   if not re.fullmatch(r'(?:[0-9]{4,}|I[0-9]+)',number,re.I) or not holder:
+    skipped+=1;errors.append(f'Row {n}: missing/invalid license number or holder');continue
+   existing=c.execute('SELECT id,holder FROM license_records WHERE license_number=?',(number,)).fetchone()
+   if existing and normalized_text(existing['holder'])!=normalized_text(holder):
+    skipped+=1;errors.append(f'Row {n}: conflicting holder for license {number}');continue
+   vals=[(r.get(k) or '').strip() for k in ['holder','license_type','status','issue_date','expiration_date','renewal_date','business_name','search_letter','page_number']]
+   if existing:
+    c.execute('UPDATE license_records SET holder=?,license_type=?,status=?,issue_date=?,expiration_date=?,renewal_date=?,business_name=?,search_letter=?,page_number=?,updated=? WHERE license_number=?',(*vals,now(),number));updated+=1
+   else:
+    c.execute('INSERT INTO license_records(license_number,holder,license_type,status,issue_date,expiration_date,renewal_date,business_name,search_letter,page_number,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(number,*vals,now()));inserted+=1
+  audit(c,'licenses_uploaded',f'inserted={inserted} updated={updated} skipped={skipped}')
+ return {'inserted':inserted,'updated':updated,'skipped':skipped,'errors':errors[:20]}
+
+
+# Research results are evidence-backed and separate from the sales-lead pipeline.
+from research import search_candidates, audit_site
+
+class LicenseResearchIn(BaseModel):
+ license_number:str
+ website:str=''
+
+@app.get('/api/research/licenses')
+def research_license_candidates(limit:int=30):
+ limit=max(1,min(limit,100))
+ with connect() as c:
+  rows=[dict(r) for r in c.execute("SELECT license_number,holder,business_name,license_type,status FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ?",(limit,))]
+  for r in rows:
+   saved=c.execute('SELECT website,checked_at,report FROM license_research WHERE license_number=?',(r['license_number'],)).fetchone()
+   r['research']=dict(saved) if saved else None
+ return {'candidates':rows,'count':len(rows),'notice':'License records are not verified companies or qualified leads.'}
+
+@app.post('/api/research/find')
+def research_find(data:LicenseResearchIn):
+ with connect() as c:
+  r=c.execute('SELECT business_name,status,license_type FROM license_records WHERE license_number=?',(data.license_number,)).fetchone()
+ if not r:raise HTTPException(404,'License not staged')
+ if r['status']!='ACTIVE' or r['license_type']!='HVAC' or not r['business_name'].strip():raise HTTPException(409,'Not an active named HVAC license')
+ urls,error=search_candidates(r['business_name'])
+ return {'license_number':data.license_number,'business_name':r['business_name'],'possible_websites':urls,'notice':'Unverified search results. Select only a website that actually belongs to this business.','error':error}
+
+@app.post('/api/research/audit')
+def research_audit(data:LicenseResearchIn):
+ with connect() as c:
+  r=c.execute('SELECT business_name,status,license_type FROM license_records WHERE license_number=?',(data.license_number,)).fetchone()
+ if not r:raise HTTPException(404,'License not staged')
+ if r['status']!='ACTIVE' or r['license_type']!='HVAC' or not r['business_name'].strip():raise HTTPException(409,'Not an active named HVAC license')
+ if not data.website.strip():raise HTTPException(400,'Choose or enter a verified business website')
+ try:report=audit_site(data.website.strip())
+ except Exception as e:raise HTTPException(422,'Website audit unavailable: '+str(e)[:180])
+ # Score is a research-priority heuristic, NOT an assertion of poor performance.
+ signals=report['signals'];score=25+15*bool(report['phones'])+10*bool(report['emails'])+10*bool(report['contact_links'])+10*bool(report['booking_links'])+10*bool(signals['contact_form'])+10*bool(signals['mobile_viewport'])+10*bool(signals['social_profiles_linked'])
+ report['research_completeness_score']=min(100,score)
+ report['business_name_from_license']=r['business_name']
+ report['identity_match']='UNVERIFIED: operator must confirm website belongs to licensed company'
+ with connect() as c:
+  prev=c.execute('SELECT license_number FROM license_research WHERE license_number=?',(data.license_number,)).fetchone()
+  if prev:c.execute('UPDATE license_research SET website=?,checked_at=?,report=? WHERE license_number=?',(report['website'],report['checked_at'],json.dumps(report),data.license_number))
+  else:c.execute('INSERT INTO license_research(license_number,website,checked_at,report) VALUES(?,?,?,?)',(data.license_number,report['website'],report['checked_at'],json.dumps(report)))
+  audit(c,'license_website_audited',data.license_number)
+ return report
+
+@app.get('/api/research/export.csv')
+def research_export():
+ with connect() as c:rows=[dict(r) for r in c.execute('SELECT l.license_number,l.business_name,l.status,r.website,r.checked_at,r.report FROM license_records l JOIN license_research r ON r.license_number=l.license_number ORDER BY r.checked_at DESC')]
+ out=io.StringIO();w=csv.writer(out);w.writerow(['license_number','business_name','status','website','checked_at','phone','email','booking_link','contact_form','research_completeness_score','findings','scope'])
+ for r in rows:
+  d=json.loads(r['report']);w.writerow([r['license_number'],r['business_name'],r['status'],r['website'],r['checked_at'],'; '.join(d['phones']),'; '.join(d['emails']),'; '.join(d['booking_links']),d['signals']['contact_form'],d['research_completeness_score'],'; '.join(d['findings']),d['scope']])
+ return StreamingResponse(iter([out.getvalue()]),media_type='text/csv',headers={'Content-Disposition':'attachment; filename=alabama_website_research.csv'})
+
+@app.get('/api/licenses')
+def get_licenses():
+ with connect() as c:
+  rows=[dict(r) for r in c.execute('SELECT * FROM license_records ORDER BY id DESC LIMIT 200')]
+  total=c.execute('SELECT COUNT(*) AS n FROM license_records').fetchone()['n']
+ return {'records':rows,'total':total,'display_limit':200}
+
 @app.get('/api/system-status')
 def system_status():
  return {'version':'3.0','database':'postgresql' if DATABASE_URL else 'temporary_sqlite','ai':'enabled' if os.getenv('OPENAI_API_KEY') else 'rule_based_fallback','email_sending':'disabled'}
