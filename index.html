@@ -65,7 +65,8 @@ async function runAutoResearch(){
  }catch(e){$('#autoResearchProgress').textContent='Research failed: '+e.message}
  finally{button.disabled=false;button.textContent='Automatically research 20 HVAC businesses'}
 }
-\ninitDiscovery();
+
+initDiscovery();
 $('#add').onsubmit=async e=>{e.preventDefault();const o=Object.fromEntries(new FormData(e.target));try{await post('/api/leads',o);e.target.reset();refresh()}catch(err){msg(err)}};
 $('#upload').onsubmit=async e=>{e.preventDefault();try{const r=await request('/import',{method:'POST',headers:{'X-CSRF-Token':csrf()},body:new FormData(e.target)});$('#importResult').textContent=`Imported ${r.imported}. ${r.errors.join('; ')}`;refresh()}catch(err){msg(err)}};
 async function draft(id){try{await request(`/api/leads/${id}/draft`,{method:'POST',headers:{'X-CSRF-Token':csrf()}});refresh()}catch(e){msg(e)}}async function approve(id){try{await request(`/api/drafts/${id}/approve`,{method:'POST',headers:{'X-CSRF-Token':csrf()}});refresh()}catch(e){msg(e)}}async function triage(){const lead_id=Number($('#replyLead').value),body=$('#replyBody').value;try{const r=await post('/api/replies',{lead_id,body});alert(`Classification: ${r.classification}\n${r.reason}`);$('#replyBody').value='';refresh()}catch(e){msg(e)}}
