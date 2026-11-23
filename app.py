@@ -29,7 +29,10 @@ class DatabaseConnection:
  def execute(self,sql,params=()):
   if self.pg:
    sql=sql.replace('?', '%s')
-   if sql.lstrip().upper().startswith('INSERT INTO') and 'RETURNING' not in sql.upper():
+   # Only these tables have generated integer id columns.
+   # license_research uses license_number as its primary key.
+   match=re.match(r'\s*INSERT\s+INTO\s+([a-z_][a-z_0-9]*)\b',sql,re.I)
+   if match and match.group(1).lower() in {'leads','drafts','replies','audit','license_records'} and 'RETURNING' not in sql.upper():
     cur=self.conn.execute(sql+' RETURNING id',params)
     class Result:
      lastrowid=cur.fetchone()['id']
