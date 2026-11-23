@@ -453,7 +453,7 @@ class OpportunityRequest(BaseModel):
 @app.post('/api/opportunities/discover')
 def opportunity_discover(data:OpportunityRequest):
  """Broad discovery, not restricted to the existing HVAC license pipeline."""
- from opportunity import collect, ai_analyze
+ from discovery import collect, ai_analyze
  limit=max(1,min(20,data.limit))
  raw=collect(limit)
  raw['ai_requested']=data.analyze_with_ai
