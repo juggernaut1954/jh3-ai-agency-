@@ -71,25 +71,57 @@ def candidate_score(name,title,url):
  if 'alabama' in title_lower or re.search(r'\b(?:al|birmingham|huntsville|mobile|montgomery|tuscaloosa)\b',title_lower):score+=15;reasons.append('Alabama geography mentioned')
  if len(overlap)<2 and len(name_tokens)>=2:score-=25;reasons.append('Insufficient company-name overlap')
  return score,reasons
+def search_candidates_detailed(name):
+  """Return candidates and an honest diagnostic trail; no unverified claims."""
+  out={}; diagnostics={'queries':[], 'raw_results':0, 'https_results':0,
+                       'excluded':0,'low_score':0,'candidate_count':0,
+                       'provider_errors':[]}
+  for query in query_variants(name):
+    item={'query':query,'result_count':0,'error':None}
+    try:
+      body,_=fetch('https://www.bing.com/search?format=rss&q='+urllib.parse.quote(query),150000)
+      root=ET.fromstring(body)
+      entries=root.findall('.//item')[:15]
+      item['result_count']=len(entries)
+      diagnostics['raw_results']+=len(entries)
+      for entry in entries:
+        url=entry.findtext('link','').strip()
+        title=html.unescape(entry.findtext('title',''))[:180]
+        if not url.startswith('https://'):continue
+        diagnostics['https_results']+=1
+        score,reasons=candidate_score(name,title,url)
+        if score<0:
+          diagnostics['excluded']+=1
+          continue
+        if score<30:
+          diagnostics['low_score']+=1
+          continue
+        host=domain(url)
+        previous=out.get(host)
+        if previous is None or score>previous['match_score']:
+          out[host]={'url':url,'title':title,'match_score':score,
+                     'match_status':'NEEDS_REVIEW','reasons':reasons}
+    except Exception as exc:
+      # Keep exception class, not URL/query secrets or raw response body.
+      item['error']=type(exc).__name__
+      diagnostics['provider_errors'].append(type(exc).__name__)
+    diagnostics['queries'].append(item)
+  candidates=sorted(out.values(),key=lambda x:-x['match_score'])[:6]
+  diagnostics['candidate_count']=len(candidates)
+  if len(diagnostics['provider_errors'])==len(diagnostics['queries']):
+    status='SEARCH_UNAVAILABLE'
+  elif not diagnostics['raw_results']:
+    status='NO_SEARCH_RESULTS'
+  elif not candidates:
+    status='NO_CONFIDENT_MATCH'
+  else:
+    status='CANDIDATES_FOUND'
+  return {'status':status,'candidates':candidates,'diagnostics':diagnostics}
+
 def search_candidates(name):
- """Multi-query discovery with conservative rejection; candidates always need identity verification."""
- out={};errors=[]
- for query in query_variants(name):
-  try:
-   body,_=fetch('https://www.bing.com/search?format=rss&q='+urllib.parse.quote(query),150000)
-   root=ET.fromstring(body)
-   for item in root.findall('.//item')[:15]:
-    url=item.findtext('link','').strip();title=html.unescape(item.findtext('title',''))[:180]
-    if not url.startswith('https://'):continue
-    score,reasons=candidate_score(name,title,url)
-    if score<30:continue
-    host=domain(url)
-    previous=out.get(host)
-    if previous is None or score>previous['match_score']:
-     out[host]={'url':url,'title':title,'match_score':score,'match_status':'NEEDS_REVIEW','reasons':reasons}
-  except Exception:errors.append('Public search source unavailable for one query')
- candidates=sorted(out.values(),key=lambda x:-x['match_score'])[:6]
- return candidates,('Some public searches were unavailable.' if errors else None)
+  result=search_candidates_detailed(name)
+  warning='Search provider unavailable for one or more queries' if result['diagnostics']['provider_errors'] else None
+  return result['candidates'],warning
 
 def _same_site(a,b):
  """Allow conventional www and HTTP-to-HTTPS redirects, not unrelated hosts."""
