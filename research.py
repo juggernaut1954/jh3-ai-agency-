@@ -1,5 +1,6 @@
 """Conservative public-web business research. No CAPTCHA bypass or invented contacts."""
 import re, json, html, urllib.parse, urllib.request, xml.etree.ElementTree as ET
+import unicodedata
 from html.parser import HTMLParser
 from datetime import datetime, timezone
 
@@ -18,7 +19,26 @@ class Extract(HTMLParser):
  def handle_data(self,data):
   if self._title:self.title+=data
   self.text.append(data)
+def clean_url(url):
+ """Remove invisible copy/paste characters and make a URL HTTP-safe."""
+ if not isinstance(url,str):raise ValueError('Website URL must be text')
+ url=''.join(c for c in url.strip() if unicodedata.category(c)!='Cf')
+ parts=urllib.parse.urlsplit(url)
+ if parts.scheme.lower() not in ('http','https') or not parts.hostname:
+  raise ValueError('Website must be a valid http:// or https:// URL')
+ if parts.username or parts.password:raise ValueError('Website URL cannot contain credentials')
+ if any(c in parts.netloc for c in '\r\n\t '):raise ValueError('Invalid website host')
+ try:
+  host=parts.hostname.encode('idna').decode('ascii')
+  port=parts.port
+ except (UnicodeError,ValueError) as exc:raise ValueError('Invalid website host or port') from exc
+ if ':' in host and not host.startswith('['):host='['+host+']'
+ if port is not None:host+=':'+str(port)
+ path=urllib.parse.quote(urllib.parse.unquote(parts.path),safe="/%:@!$&'()*+,;=-._~")
+ query=urllib.parse.quote(urllib.parse.unquote(parts.query),safe="/%?:@!$&'()*+,;=-._~")
+ return urllib.parse.urlunsplit((parts.scheme.lower(),host,path,query,''))
 def fetch(url,limit=350000):
+ url=clean_url(url)
  req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'text/html,application/rss+xml,application/xml'})
  with urllib.request.urlopen(req,timeout=9) as r:
   typ=r.headers.get('Content-Type','')
@@ -97,6 +117,7 @@ def identity_evidence(name,url):
   return {'status':'NEEDS_REVIEW','reasons':['Homepage could not be independently checked']}
 
 def audit_site(url):
+ url=clean_url(url)
  if not url.startswith('https://') and not url.startswith('http://'):raise ValueError('Website must start with http:// or https://')
  p=urllib.parse.urlparse(url)
  if not p.hostname or p.username or p.password:raise ValueError('Invalid website URL')
