@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from html import escape
 from urllib.parse import urlparse
-from discovery import MARKETS, INDUSTRIES, discover, DiscoveryError
+from discovery import MARKETS, INDUSTRIES, discover, DiscoveryError, enrich_cached
 
 ROOT=Path(__file__).parent
 DB=Path(os.getenv('JH3_DB',str(ROOT/'agency.db')))
@@ -213,6 +213,22 @@ def discovery_preview(market:str,industry:str,limit:int=20):
    candidate['existing_status']=duplicate['status'] if duplicate else None
  return {'candidates':candidates,'count':len(candidates),
          'notice':'Research candidates only. Review public source and details before importing. No emails sent.'}
+
+class DiscoveryEnrich(BaseModel):
+ market:str
+ industry:str
+ source:str
+
+@app.post('/api/discovery/enrich')
+def discovery_enrich(data:DiscoveryEnrich):
+ try:
+  candidate=enrich_cached(data.market,data.industry,data.source)
+  with connect() as c:
+   duplicate=find_duplicate(c,candidate)
+   candidate['existing_lead_id']=duplicate['id'] if duplicate else None
+   candidate['existing_status']=duplicate['status'] if duplicate else None
+  return candidate
+ except ValueError as e:raise HTTPException(400,str(e))
 
 class DiscoveryImport(BaseModel):
  name:str
