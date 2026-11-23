@@ -1,35 +1,21 @@
-# JH III AI Revenue Agency — Secure Mobile Cloud MVP
+# Agent 1 Alabama licensing integration
 
-A **deployable**, mobile-responsive three-workflow dashboard. It is **not hosted yet**. Hosting requires a Render account and deployment. No desktop is required for normal use after deployment.
+## Files
+- `app.py` and `index.html`: replacements for the two supplied files, preserving existing routes and UI and adding a licensing staging/review workflow.
+- `collector.py`: standalone Playwright collector prototype, not yet tested against live Alabama search results.
+- `requirements-collector.txt`: local collector requirements; do not add Playwright to Render.
 
-## Features
-- Administrator password sign-in; signed, 12-hour secure HTTP-only session cookie.
-- CSRF protection for all state-changing requests; origin check; basic login throttling; security headers.
-- Persistent SQLite database on an attached cloud disk; CSV imports and exports; lead scoring; draft approval; reply classification and opt-out blocking.
-- Mobile browser layout; cloud runs independently of your phone.
+## Installation
+1. Commit the replacement `app.py` and `index.html` to the `version-3-testing` branch in the same locations as the existing files. Keep `discovery.py`, `security.py`, Dockerfile, and existing requirements unchanged.
+2. Render redeploys. Open the dashboard and find **Agent 1 · Alabama license records**.
+3. On a desktop with Python 3.10+, run `pip install -r requirements-collector.txt`, `python -m playwright install chromium`, and `python collector.py --letter B`.
+4. In the browser, enter the letter and verification code manually, submit, then press Enter in the terminal. The collector tries to click Next and saves `alabama_licenses.csv` after each page.
+5. Upload that CSV in the dashboard, review entries, verify the company city/contact information, and import selected active contractor records.
 
-## Deploy to Render (from Android browser)
-1. Create a **private GitHub repository** and upload the files in this folder (not the ZIP itself). Never commit credentials or customer data.
-2. Log in to Render, choose **New → Blueprint**, connect the private repository, and apply `render.yaml`.
-3. When prompted for `ADMIN_PASSWORD`, enter a **unique password of at least 16 characters**. `SESSION_SECRET` is generated automatically.
-4. Select a paid plan supporting a persistent disk. A free ephemeral service would lose the SQLite database on restart.
-5. Wait for the service to deploy, then open its `https://...onrender.com` URL on Android and sign in.
-6. Add real verified prospects or import CSV; generate drafts, approve them and manually send them from your own email provider.
-7. Back up lead data using **Export CSV** regularly. Export is not a full backup of drafts/replies/audit; use provider disk backups or database snapshots for disaster recovery.
-
-**Never publish the password or session secret.** Use HTTPS, restrict repository access, enable 2FA on GitHub and Render, and keep dependencies updated. Use a real external rate limiter / WAF for stronger brute-force protection; the included in-process limiter resets on restart and is not multi-instance safe. This is a single-user MVP, not audited enterprise-grade security. No encrypted-at-rest database, MFA, or fine-grained user roles.
-
-## Run locally (optional)
-```bash
-export SESSION_SECRET='replace-with-random-secret-at-least-32-characters'
-export ADMIN_PASSWORD='replace-with-unique-password-at-least-16-chars'
-pip install -r requirements.txt
-uvicorn app:app --reload
-```
-Local HTTP login sets secure cookies, so use HTTPS or adjust secure cookie flags for development only. The deployed HTTPS environment is the intended target.
-
-## What is NOT connected
-No live business search, no LLM calls, no Gmail inbox, no sending email, no automated prospect discovery. These are **rule-based workflows**, not fully autonomous AI agents. Outbound messaging is always manually sent. Comply with CAN-SPAM, opt-outs, and privacy laws.
-
-## Database
-SQLite at `JH3_DB`, default local `agency.db`, Render disk `/data/agency.db`. Use one web instance; do not horizontally scale SQLite writes.
+## Limits
+- The collector is **not hosted** on Render; a cloud page cannot display an interactive verification challenge in a local browser automatically.
+- Pagination selectors are unverified against the live website; the collector will stop if the site differs.
+- Staged licensing records are separate from leads; nothing is emailed.
+- Duplicate license numbers are updated rather than inserted twice, except reviewed/conflicting holder records are skipped. Business-level duplicates are checked by existing lead logic, but names differing across licenses can still require human reconciliation.
+- The list API currently displays the first 200 staged records. For larger sets, add pagination before operational use.
+- Test on a staging Render service and back up the database before replacing production files.
