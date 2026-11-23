@@ -143,56 +143,96 @@ def discover(market, industry, limit=20):
 import html, json, re, urllib.parse, urllib.request, xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
+# Search by the underlying problem, not by a bare year. Search snippets are
+# untrusted candidate evidence, never automatically verified demand.
 QUERIES = [
- '2026 businesses unable to find suppliers shortage unmet demand',
- '2026 small business operational bottleneck costly manual process survey',
- '2026 municipal government infrastructure backlog procurement need',
- '2026 hospital clinic administrative delays claims staffing shortage',
- '2026 manufacturing component shortage production delays buyers',
- '2026 property insurance coverage gaps homeowners businesses',
- '2026 transportation logistics capacity delays unmet need',
- '2026 schools districts staffing transportation maintenance shortage',
- '2026 small business cybersecurity compliance gap survey',
- '2026 agriculture food processing shortage buyers suppliers',
- '2026 construction contractors materials labor backlog',
- '2026 business customers frustrated unavailable service underserved market',
- '2026 public utilities water wastewater repair backlog',
- '2026 businesses regulatory deadline compliance outsourcing demand',
+ 'small businesses supplier shortages delayed orders survey',
+ 'manufacturers cannot source components production delays',
+ 'rural hospitals claims denials administrative backlog survey',
+ 'water utilities aging pipes repair backlog funding',
+ 'small companies cyber insurance requirements compliance gap',
+ 'school districts bus driver shortages routes cancelled',
+ 'construction projects delayed skilled labor shortage contractors',
+ 'property insurers nonrenewals homeowners coverage shortage',
+ 'municipal wastewater treatment infrastructure repairs backlog',
+ 'agricultural producers unable to find food processing capacity',
+ 'businesses losing customers unanswered phone calls research',
+ 'small business delayed payments cash flow invoice survey',
+ 'commercial building owners insurance premiums repairs shortage',
+ 'freight shippers warehouse capacity bottlenecks delays',
 ]
 BLOCKED={'bing.com','google.com','youtube.com','facebook.com','instagram.com','tiktok.com','pinterest.com','reddit.com','x.com','twitter.com'}
+NOISE_HOSTS={'wikipedia.org','britannica.com','timeanddate.com','calendardate.com','onthisday.com','thefactsite.com','calendarpedia.com'}
+NOISE_TERMS={'calendar','on this day','famous birthdays','horoscope','zodiac','election results','midterm election','daylight saving','historical events','this year in history','facts and events','printable calendar','moon phases'}
+PAIN_TERMS={'shortage','shortages','backlog','backlogs','delay','delays','delayed','unfilled','cannot','unable','struggling','lack','lacking','gap','gaps','denial','denials','cost','costs','expensive','rising','increased','failure','failures','outage','outages','aging','understaffed','staffing','nonrenewal','nonrenewals','unmet','bottleneck','bottlenecks','cancelled','canceled','lost','losses','unavailable','overdue','unanswered','uninsured','overwhelmed','waiting','waitlist','waitlists','need','needs','insufficient','capacity','repair','repairs'}
+BUYER_TERMS={'business','businesses','company','companies','supplier','suppliers','manufactur','hospital','clinic','patient','school','district','municipal','government','utility','utilities','contractor','construction','homeowner','property','insurance','insurer','farm','agricultur','warehouse','freight','shipper','customer','customers','employer','workforce','employee','retailer','restaurant','commercial','industry','industries','facility','facilities','claims','invoice','invoices','recruit','cyber','water','wastewater','infrastructure','transportation'}
+
+def _domain_blocked(host, blocked):
+ return any(host==x or host.endswith('.'+x) for x in blocked)
+
+def _relevant(title, summary, host):
+ """Reject broad keyword collisions before counting any result."""
+ if _domain_blocked(host, NOISE_HOSTS):return False
+ t=re.sub(r'\s+',' ',html.unescape(title+' '+summary)).lower()
+ if any(x in t for x in NOISE_TERMS):return False
+ # A genuine operational pain and an affected commercial sector must both appear.
+ if not any(x in t for x in PAIN_TERMS):return False
+ if not any(x in t for x in BUYER_TERMS):return False
+ return True
 
 def collect(limit=20, fetch=None):
- """Return sourced research leads, not verified opportunities. Never invent missing results."""
+ """Return relevant source candidates, not a fabricated quota of 20 opportunities."""
+ limit=max(1,min(int(limit),20))
  def default_fetch(q):
   url='https://www.bing.com/search?format=rss&q='+urllib.parse.quote(q)
-  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; JH3OpportunityResearch/1.0)'})
+  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; JH3OpportunityResearch/1.1)'})
   with urllib.request.urlopen(req,timeout=10) as response:
    return response.read(350000)
  fetch=fetch or default_fetch
- results=[];seen=set();errors=[]
+ results=[];seen=set();errors=[];rejected=0;host_counts={}
+ # Two-pass: first seek variety across problem areas, then fill remaining slots.
+ buckets=[]
  for query in QUERIES:
-  if len(results)>=limit:break
   try:
    root=ET.fromstring(fetch(query))
+   bucket=[]
    for item in root.findall('.//item'):
     link=(item.findtext('link') or '').strip()
     title=html.unescape(re.sub('<[^>]*>','',item.findtext('title') or '')).strip()
     summary=html.unescape(re.sub('<[^>]*>','',item.findtext('description') or '')).strip()
-    parsed=urlparse(link)
-    host=(parsed.hostname or '').lower()
-    if parsed.scheme!='https' or not host or any(host==x or host.endswith('.'+x) for x in BLOCKED):continue
+    parsed=urlparse(link);host=(parsed.hostname or '').lower().removeprefix('www.')
+    if parsed.scheme!='https' or not host or _domain_blocked(host,BLOCKED) or len(title)<15 or not _relevant(title,summary,host):
+     rejected+=1;continue
     key=link.split('#')[0].rstrip('/')
-    if key in seen or len(title)<15:continue
+    if key in seen:continue
     seen.add(key)
-    results.append({'title':title[:240],'source_url':link,'source_domain':host,'excerpt':summary[:900],
-                    'search_query':query,'status':'SOURCE_FOUND_REQUIRES_ANALYSIS',
-                    'source_date':'Not confirmed','buyer':'Not established','unmet_demand':'Not established',
-                    'revenue_model':'Not established','next_step':'Read source and validate buyer, urgency, alternatives, and budget'})
-    if len(results)>=limit:break
+    bucket.append({'title':title[:240],'source_url':link,'source_domain':host,'excerpt':summary[:900],
+      'search_query':query,'status':'RELEVANT_SOURCE_REQUIRES_VALIDATION',
+      'source_date':'Not confirmed','buyer':'Not established','unmet_demand':'Not established',
+      'revenue_model':'Not established','next_step':'Verify the original source, date, buyer, existing solutions and willingness to pay'})
+   buckets.append(bucket)
   except Exception as exc:
    errors.append({'query':query,'error':type(exc).__name__})
- return {'count':len(results),'requested':limit,'results':results,'errors':errors,
-         'notice':'Search-index excerpts only. These are source leads, NOT verified business opportunities, buyer demand, or available contracts.'}
+ # One result per problem area first; no single publisher dominates the list.
+ for index in range(max((len(x) for x in buckets),default=0)):
+  for bucket in buckets:
+   if index>=len(bucket):continue
+   item=bucket[index];host=item['source_domain']
+   if host_counts.get(host,0)>=2:continue
+   results.append(item);host_counts[host]=host_counts.get(host,0)+1
+   if len(results)>=limit:break
+  if len(results)>=limit:break
+ return {'count':len(results),'requested':limit,'results':results,'errors':errors,'rejected_irrelevant':rejected,
+   'notice':'Filtered source leads only, not verified opportunities. Fewer than 20 is acceptable when evidence is insufficient.'}
+
+# Preserve the pre-existing /api/discovery/enrich contract used by app.py.
+def enrich_cached(market,industry,source):
+ if not re.fullmatch(r'https://www\.openstreetmap\.org/(node|way|relation)/[0-9]+',source or ''):
+  raise ValueError('Invalid OpenStreetMap source')
+ candidates=discover(market,industry,50)
+ for candidate in candidates:
+  if candidate['source']==source:return dict(candidate)
+ raise ValueError('Source not found in current discovery results')
 
 def ai_analyze(source_items, ai_text):
  """AI must cite only provided URLs; validate output against source inputs."""
@@ -221,27 +261,3 @@ def ai_analyze(source_items, ai_text):
   record['confidence']=entry.get('confidence') if entry.get('confidence') in ('low','medium') else 'low'
   out.append(record)
  return out
-
-
-def enrich_cached(market, industry, source):
-    """Return an OSM candidate already seen in preview, without untrusted URL fetching.
-
-    This endpoint is for review of public OSM metadata, not a verified contact audit.
-    If the preview cache expired, repeat the bounded discovery lookup.
-    """
-    if market not in MARKETS or industry not in INDUSTRIES:
-        raise ValueError('Unsupported market or industry')
-    if not isinstance(source, str) or not re.fullmatch(
-        r'https://www\.openstreetmap\.org/(?:node|way|relation)/[0-9]+', source
-    ):
-        raise ValueError('Invalid OpenStreetMap source')
-    key = (market, industry)
-    cached = _cache.get(key)
-    if cached and time.monotonic() - cached[0] < CACHE_SECONDS:
-        candidates = cached[1]
-    else:
-        candidates = discover(market, industry, 50)
-    for candidate in candidates:
-        if candidate['source'] == source:
-            return dict(candidate)
-    raise ValueError('Listing not found in this market and industry; refresh preview')
