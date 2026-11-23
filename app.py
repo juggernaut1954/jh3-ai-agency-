@@ -398,11 +398,11 @@ def research_auto(data:AutoResearchRequest):
  limit=max(1,min(data.limit,20));offset=max(0,data.offset)
  with connect() as c:
   rows=[dict(r) for r in c.execute(
-   "SELECT license_number,business_name FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ? OFFSET ?",(limit,offset))]
+   "SELECT license_number,business_name,holder FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ? OFFSET ?",(limit,offset))]
  results=[]
  for row in rows:
-  try:results.append(discover_presence(row['business_name'],row['license_number']))
-  except Exception as exc:results.append({'license_number':row['license_number'],'business_name':row['business_name'],'classification':'IDENTITY_UNCONFIRMED','presence':[],'verified':False,'error':type(exc).__name__})
+  try:results.append(discover_presence(row['business_name'],row['license_number'],row['holder']))
+  except Exception as exc:results.append({'license_number':row['license_number'],'business_name':row['business_name'],'license_holder':row['holder'],'classification':'IDENTITY_UNCONFIRMED','presence':[],'verified':False,'error':type(exc).__name__})
  return {'count':len(results),'offset':offset,'next_offset':offset+len(results),'results':results,
          'notice':'All four classifications are research candidates, not independently verified identities. No leads automatically imported.'}
 
@@ -445,6 +445,30 @@ def get_licenses():
   rows=[dict(r) for r in c.execute('SELECT * FROM license_records ORDER BY id DESC LIMIT 200')]
   total=c.execute('SELECT COUNT(*) AS n FROM license_records').fetchone()['n']
  return {'records':rows,'total':total,'display_limit':200}
+
+class OpportunityRequest(BaseModel):
+ limit:int=20
+ analyze_with_ai:bool=True
+
+@app.post('/api/opportunities/discover')
+def opportunity_discover(data:OpportunityRequest):
+ """Broad discovery, not restricted to the existing HVAC license pipeline."""
+ from opportunity import collect, ai_analyze
+ limit=max(1,min(20,data.limit))
+ raw=collect(limit)
+ raw['ai_requested']=data.analyze_with_ai
+ raw['ai_status']='not_requested'
+ raw['opportunities']=[]
+ if data.analyze_with_ai and raw['results']:
+  if not os.getenv('OPENAI_API_KEY'):
+   raw['ai_status']='not_configured'
+  else:
+   try:
+    raw['opportunities']=ai_analyze(raw['results'],ai_text)
+    raw['ai_status']='completed'
+   except Exception as exc:
+    raw['ai_status']='failed_'+type(exc).__name__
+ return raw
 
 @app.get('/api/system-status')
 def system_status():
