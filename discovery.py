@@ -221,3 +221,27 @@ def ai_analyze(source_items, ai_text):
   record['confidence']=entry.get('confidence') if entry.get('confidence') in ('low','medium') else 'low'
   out.append(record)
  return out
+
+
+def enrich_cached(market, industry, source):
+    """Return an OSM candidate already seen in preview, without untrusted URL fetching.
+
+    This endpoint is for review of public OSM metadata, not a verified contact audit.
+    If the preview cache expired, repeat the bounded discovery lookup.
+    """
+    if market not in MARKETS or industry not in INDUSTRIES:
+        raise ValueError('Unsupported market or industry')
+    if not isinstance(source, str) or not re.fullmatch(
+        r'https://www\.openstreetmap\.org/(?:node|way|relation)/[0-9]+', source
+    ):
+        raise ValueError('Invalid OpenStreetMap source')
+    key = (market, industry)
+    cached = _cache.get(key)
+    if cached and time.monotonic() - cached[0] < CACHE_SECONDS:
+        candidates = cached[1]
+    else:
+        candidates = discover(market, industry, 50)
+    for candidate in candidates:
+        if candidate['source'] == source:
+            return dict(candidate)
+    raise ValueError('Listing not found in this market and industry; refresh preview')
