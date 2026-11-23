@@ -136,3 +136,40 @@ def discover(market, industry, limit=20):
             results.append(candidate)
     _cache[key] = (time.monotonic(), results)
     return results[:limit]
+
+
+def enrich_cached(market, industry, source):
+    """Inspect a previously discovered OSM listing, never a user-supplied URL.
+
+    Keeps the existing /api/discovery/enrich contract without making new
+    discovery requests or treating extracted contacts as verified.
+    """
+    if market not in MARKETS or industry not in INDUSTRIES:
+        raise ValueError('Unsupported market or industry')
+    if not isinstance(source, str) or not re.fullmatch(
+        r'https://www\.openstreetmap\.org/(?:node|way|relation)/[0-9]+', source
+    ):
+        raise ValueError('Invalid OpenStreetMap source')
+    entry = _cache.get((market, industry))
+    if not entry or time.monotonic() - entry[0] >= CACHE_SECONDS:
+        raise ValueError('Discovery results expired. Run Find businesses again.')
+    candidate = next((c for c in entry[1] if c['source'] == source), None)
+    if candidate is None:
+        raise ValueError('Source was not found in the current discovery results')
+    result = dict(candidate)
+    result.setdefault('phone', '')
+    result['enrichment_status'] = 'NO_WEBSITE'
+    if not result.get('website'):
+        return result
+    from research import audit_site
+    try:
+        report = audit_site(result['website'])
+    except (ValueError, OSError, TimeoutError) as exc:
+        result['enrichment_status'] = 'WEBSITE_CHECK_FAILED'
+        result['enrichment_note'] = type(exc).__name__
+        return result
+    result['enrichment_status'] = 'WEBSITE_INSPECTED_UNVERIFIED'
+    result['email'] = result.get('email') or next(iter(report.get('emails') or []), '')
+    result['phone'] = next(iter(report.get('phones') or []), '')
+    result['enrichment_note'] = 'Public website contacts; business identity not independently verified'
+    return result
