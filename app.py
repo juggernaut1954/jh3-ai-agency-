@@ -359,7 +359,7 @@ async def upload_licenses(file:UploadFile=File(...)):
 
 
 # Research results are evidence-backed and separate from the sales-lead pipeline.
-from research import search_candidates, audit_site, identity_evidence
+from research import search_candidates, search_candidates_detailed, audit_site, identity_evidence
 
 class LicenseResearchIn(BaseModel):
  license_number:str
@@ -387,6 +387,40 @@ def research_find(data:LicenseResearchIn):
   item['match_status']=item['identity_check']['status']
  return {'license_number':data.license_number,'business_name':r['business_name'],'possible_websites':urls,'notice':'Unverified search results. Select only a website that actually belongs to this business.','error':error}
 
+class AutoResearchIn(BaseModel):
+  limit:int=20
+  offset:int=0
+
+@app.post('/api/research/auto')
+def research_auto(data:AutoResearchIn):
+  """Search staged active HVAC licensees without manually supplied websites.
+
+  Results are research candidates, not independently verified prospects.
+  Does not import leads, send emails, or overwrite previous research.
+  """
+  limit=max(1,min(data.limit,20))
+  offset=max(0,data.offset)
+  with connect() as c:
+    rows=[dict(r) for r in c.execute("SELECT license_number,business_name,license_type,status FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ? OFFSET ?",(limit,offset))]
+  results=[]
+  for row in rows:
+    search=search_candidates_detailed(row['business_name'])
+    candidates=[]
+    for candidate in search['candidates'][:3]:
+      identity=identity_evidence(row['business_name'],candidate['url'])
+      candidates.append({**candidate,'identity':identity})
+    status=search['status']
+    if candidates:
+      if any(c['identity']['status']=='NEEDS_REVIEW' for c in candidates):
+        status='IDENTITY_EVIDENCE_FOUND_REVIEW_REQUIRED'
+      elif all(c['identity']['status']=='UNCONFIRMED' for c in candidates):
+        status='WEBSITE_IDENTITY_UNCONFIRMED'
+    results.append({'license_number':row['license_number'],
+                    'business_name':row['business_name'], 'status':status,
+                    'candidates':candidates,'diagnostics':search['diagnostics']})
+  return {'results':results,'count':len(results),'offset':offset,
+          'notice':'No website or business identity is independently verified. Review candidate evidence and confirm licensed company identity before importing as a prospect. No emails sent.'}
+
 @app.post('/api/research/audit')
 def research_audit(data:LicenseResearchIn):
  with connect() as c:
@@ -410,45 +444,6 @@ def research_audit(data:LicenseResearchIn):
   else:c.execute('INSERT INTO license_research(license_number,website,checked_at,report) VALUES(?,?,?,?)',(data.license_number,report['website'],report['checked_at'],json.dumps(report)))
   audit(c,'license_website_audited',data.license_number)
  return report
-
-@app.post('/api/research/auto')
-def research_auto(data:LicenseResearchIn):
- """Research one staged license per request to avoid long-running batch timeouts."""
- with connect() as c:
-  r=c.execute('SELECT business_name,holder,status,license_type FROM license_records WHERE license_number=?',(data.license_number,)).fetchone()
- if not r:raise HTTPException(404,'License not staged')
- if r['status']!='ACTIVE' or r['license_type']!='HVAC' or not r['business_name'].strip():
-  raise HTTPException(409,'Not an active named HVAC license')
- name=r['business_name'].strip()
- candidates,warning=search_candidates(name)
- attempts=[]
- for item in candidates[:4]:
-  url=item['url']
-  evidence=identity_evidence(name,url)
-  if evidence['status']!='NEEDS_REVIEW' or not all(evidence.get(k) for k in ('name_match','industry_match','location_match')):
-   attempts.append({'url':url,'reason':'Identity evidence insufficient','identity':evidence})
-   continue
-  try:
-   report=audit_site(url)
-   # The audit must be for the exact same site as the independent identity check.
-   if normalized_domain(report['website'])!=normalized_domain(evidence.get('final_url')):
-    attempts.append({'url':url,'reason':'Audited site differs from identity-checked site'});continue
-   signals=report['signals']
-   score=25+15*bool(report['phones'])+10*bool(report['emails'])+10*bool(report['contact_links'])+10*bool(report['booking_links'])+10*bool(signals['contact_form'])+10*bool(signals['mobile_viewport'])+10*bool(signals['social_profiles_linked'])
-   report.update(research_completeness_score=min(100,score),business_name_from_license=name,
-                 identity_match='NEEDS_REVIEW: human must confirm website belongs to licensed company',
-                 identity_evidence=evidence,discovery_source='automated public search',
-                 search_candidate=item,search_warning=warning)
-   with connect() as c:
-    prev=c.execute('SELECT license_number FROM license_research WHERE license_number=?',(data.license_number,)).fetchone()
-    if prev:c.execute('UPDATE license_research SET website=?,checked_at=?,report=? WHERE license_number=?',(report['website'],report['checked_at'],json.dumps(report),data.license_number))
-    else:c.execute('INSERT INTO license_research(license_number,website,checked_at,report) VALUES(?,?,?,?)',(data.license_number,report['website'],report['checked_at'],json.dumps(report)))
-    audit(c,'license_auto_researched',data.license_number)
-   return {'status':'RESEARCHED_NEEDS_REVIEW','license_number':data.license_number,'business_name':name,'report':report,'attempts':attempts}
-  except Exception as exc:
-   attempts.append({'url':url,'reason':'Audit failed: '+type(exc).__name__})
- return {'status':'NO_CONFIDENT_MATCH','license_number':data.license_number,'business_name':name,
-         'attempts':attempts,'search_warning':warning,'note':'No website was accepted or saved. Manual investigation needed.'}
 
 @app.get('/api/research/export.csv')
 def research_export():
