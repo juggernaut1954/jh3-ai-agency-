@@ -12,10 +12,11 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 OVERPASS_URLS = (
+    'https://ovp.dresel.systems/api-na/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
     'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
 )
-USER_AGENT = 'JHIII-Agent1-Discovery/0.2 (manual research; contact: info@jh3mining.com)'
+USER_AGENT = 'JHIII-Agent1-Discovery/0.3 (manual research; contact: info@jh3mining.com)'
 MARKETS = {
     'huntsville-al': {'label': 'Huntsville, Alabama', 'bbox': (34.60, -86.80, 34.85, -86.45)},
     'nw-arkansas': {'label': 'Northwest Arkansas', 'bbox': (36.00, -94.30, 36.45, -93.95)},
@@ -81,7 +82,7 @@ def _fetch(url, payload):
                   headers={'User-Agent': USER_AGENT,
                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
                   method='POST')
-    with urlopen(req, timeout=25) as response:
+    with urlopen(req, timeout=20) as response:
         if response.status != 200:
             raise DiscoveryError(f'Upstream HTTP {response.status}')
         raw = response.read(2_000_001)
