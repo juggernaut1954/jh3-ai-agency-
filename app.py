@@ -393,27 +393,18 @@ class AutoResearchRequest(BaseModel):
 
 @app.post('/api/research/auto')
 def research_auto(data:AutoResearchRequest):
- """Small batches reduce timeouts. Search hits are NOT verified leads."""
- from research import search_candidates_detailed
- limit=max(1,min(data.limit,20))
- offset=max(0,data.offset)
+ """Classify exactly up to 20 staged license records; preserve original records."""
+ from research import discover_presence
+ limit=max(1,min(data.limit,20));offset=max(0,data.offset)
  with connect() as c:
   rows=[dict(r) for r in c.execute(
-   "SELECT license_number,business_name FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ? OFFSET ?",
-   (limit,offset))]
+   "SELECT license_number,business_name FROM license_records WHERE status='ACTIVE' AND license_type='HVAC' AND LENGTH(TRIM(business_name))>2 ORDER BY id LIMIT ? OFFSET ?",(limit,offset))]
  results=[]
  for row in rows:
-  found=search_candidates_detailed(row['business_name'])
-  checked=[]
-  for item in found['candidates'][:2]:
-   evidence=identity_evidence(row['business_name'],item['url'])
-   checked.append({**item,'identity':evidence})
-  results.append({'license_number':row['license_number'],
-                  'business_name':row['business_name'],
-                  'status':('REVIEW_REQUIRED' if checked else found['status']),
-                  'candidates':checked,'diagnostics':found['diagnostics']})
- return {'count':len(results),'offset':offset,'next_offset':offset+len(results),
-         'results':results,'notice':'Search candidates only. No independently verified businesses or automatic lead imports.'}
+  try:results.append(discover_presence(row['business_name'],row['license_number']))
+  except Exception as exc:results.append({'license_number':row['license_number'],'business_name':row['business_name'],'classification':'IDENTITY_UNCONFIRMED','presence':[],'verified':False,'error':type(exc).__name__})
+ return {'count':len(results),'offset':offset,'next_offset':offset+len(results),'results':results,
+         'notice':'All four classifications are research candidates, not independently verified identities. No leads automatically imported.'}
 
 @app.post('/api/research/audit')
 def research_audit(data:LicenseResearchIn):

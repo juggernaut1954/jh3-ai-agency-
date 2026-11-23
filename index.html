@@ -50,22 +50,20 @@ async function auditResearch(i){
 let autoOffset=0;
 function resetAutoResearch(){autoOffset=0;$('#autoResearchProgress').textContent='Batch offset: 0';$('#autoResearchResults').textContent='';}
 async function runAutoResearch(){
- const button=$('#autoResearchButton');button.disabled=true;button.textContent='Researching…';
+ const button=$('#autoResearchButton');button.disabled=true;button.textContent='Researching 20…';
  try{
-  const result=await post('/api/research/auto',{limit:20,offset:autoOffset});
-  autoOffset=result.next_offset;
-  $('#autoResearchProgress').textContent='Processed through offset '+autoOffset+'. Found '+result.count+' license records in this batch. No verified prospects imported.';
-  const target=$('#autoResearchResults');
-  if(!result.count){target.insertAdjacentHTML('beforeend','<p>No further active named HVAC license records in staging.</p>');return;}
-  target.insertAdjacentHTML('beforeend',result.results.map(r=>{
-   const sites=(r.candidates||[]).map(c=>'<p><a target="_blank" rel="noopener noreferrer" href="'+safe(c.url)+'">'+safe(c.title||c.url)+'</a><br><small>Identity: '+safe(c.identity?.status||'UNCONFIRMED')+' — '+safe((c.identity?.reasons||[]).join('; '))+'</small></p>').join('');
-   const d=r.diagnostics||{};
-   return '<div class="card" style="margin:10px 0"><b>'+safe(r.business_name)+'</b> · License '+safe(r.license_number)+'<p>'+safe(r.status)+'</p>'+(sites||'<p>No plausible official website found.</p>')+'<small>Search results: '+safe(d.raw_results||0)+'; rejected: '+safe((d.excluded||0)+(d.low_score||0))+'; provider errors: '+safe((d.provider_errors||[]).length)+'</small></div>';
-  }).join(''));
- }catch(e){$('#autoResearchProgress').textContent='Research failed: '+e.message}
+  const result=await post('/api/research/auto',{limit:20,offset:autoOffset});autoOffset=result.next_offset;
+  const counts={OFFICIAL_WEBSITE_CANDIDATE:0,SOCIAL_MEDIA_CANDIDATE:0,DIRECTORY_CANDIDATE:0,IDENTITY_UNCONFIRMED:0};
+  result.results.forEach(r=>{counts[r.classification]=(counts[r.classification]||0)+1});
+  $('#autoResearchProgress').textContent='Processed '+result.count+' records. Website candidates: '+counts.OFFICIAL_WEBSITE_CANDIDATE+' · Social candidates: '+counts.SOCIAL_MEDIA_CANDIDATE+' · Directory candidates: '+counts.DIRECTORY_CANDIDATE+' · Unconfirmed: '+counts.IDENTITY_UNCONFIRMED+'. None automatically verified.';
+  const labels={OFFICIAL_WEBSITE_CANDIDATE:'Official website candidate',SOCIAL_MEDIA_CANDIDATE:'Social media candidate',DIRECTORY_CANDIDATE:'Directory candidate',IDENTITY_UNCONFIRMED:'Identity unconfirmed'};
+  $('#autoResearchResults').insertAdjacentHTML('beforeend',result.results.map(r=>{
+   const entries=(r.presence||[]).map(x=>'<p><span class="tag">'+safe(x.kind)+'</span> <a href="'+safe(x.url)+'" target="_blank" rel="noopener noreferrer">'+safe(x.title||x.url)+'</a><br><small>'+safe(x.status)+' · '+safe((x.reasons||[]).join('; '))+'</small></p>').join('');
+   return '<div class="card" style="margin:10px 0"><b>'+safe(r.business_name)+'</b> · License '+safe(r.license_number)+'<p><strong>'+safe(labels[r.classification]||r.classification)+'</strong> — requires review</p>'+(entries||'<p>No sufficiently supported online presence found. This does not prove the business has no website.</p>')+'<small>Search results: '+safe(r.diagnostics?.raw_results||0)+'; search errors: '+safe((r.diagnostics?.provider_errors||[]).join(', ')||'none')+'</small></div>';
+  }).join('')||'<p>No more eligible records in staging.</p>');
+ }catch(e){$('#autoResearchProgress').textContent='Research error: '+e.message}
  finally{button.disabled=false;button.textContent='Automatically research 20 HVAC businesses'}
 }
-
 initDiscovery();
 $('#add').onsubmit=async e=>{e.preventDefault();const o=Object.fromEntries(new FormData(e.target));try{await post('/api/leads',o);e.target.reset();refresh()}catch(err){msg(err)}};
 $('#upload').onsubmit=async e=>{e.preventDefault();try{const r=await request('/import',{method:'POST',headers:{'X-CSRF-Token':csrf()},body:new FormData(e.target)});$('#importResult').textContent=`Imported ${r.imported}. ${r.errors.join('; ')}`;refresh()}catch(err){msg(err)}};

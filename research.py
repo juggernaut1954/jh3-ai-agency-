@@ -456,3 +456,73 @@ def audit_site(url):
         'source_url': final,
         'scope': 'homepage only; public contacts unverified; no Google review, ad-spend, call-answering or revenue verification',
     }
+
+
+# Four-category online presence discovery (no paid API).
+"""Evidence-first business presence classification; no paid APIs or fabricated matches."""
+import re, html, urllib.parse, xml.etree.ElementTree as ET
+
+
+SOCIAL={'facebook.com','instagram.com','linkedin.com','tiktok.com','youtube.com','nextdoor.com'}
+DIRECTORY={'yelp.com','yellowpages.com','bbb.org','angi.com','manta.com','chamberofcommerce.com','mapquest.com','buildzoom.com','homeadvisor.com','thumbtack.com','porch.com','google.com'}
+EXCLUDE={'bing.com','wikipedia.org','merriam-webster.com','dictionary.cambridge.org','microsoft.com','support.microsoft.com','associatedbank.com','reddit.com','amazon.com'}
+GENERIC={'advanced','associated','central','general','american','united','quality','best','first','professional','total','all','solutions','services','service','group','holding','holdings','property','management','company','inc','llc','corp','the','and','of','alabama','heating','cooling','air','conditioning','mechanical','contractor','contractors','hvac','pros','electric'}
+
+def kind(url):
+ host=domain(url)
+ if not host or any(host==x or host.endswith('.'+x) for x in EXCLUDE):return 'excluded'
+ if any(host==x or host.endswith('.'+x) for x in SOCIAL):return 'social'
+ if any(host==x or host.endswith('.'+x) for x in DIRECTORY):return 'directory'
+ return 'website'
+
+def identity_terms(name):
+ return {w for w in tokens(name) if w not in GENERIC}
+
+def name_support(name,title,url):
+ wanted=identity_terms(name)
+ observed=set(re.findall(r'[a-z0-9]+',html.unescape(title+' '+urllib.parse.unquote(urllib.parse.urlsplit(url).path)+' '+domain(url)).lower()))
+ if not wanted:return False, 'Business name too generic to verify from search title'
+ if len(wanted)==1:return next(iter(wanted)) in observed, 'Distinctive name term in listing' if wanted<=observed else 'Distinctive name term missing'
+ matched=wanted & observed
+ return len(matched)>=2 or (len(matched)==1 and len(wanted)==2 and max(map(len,matched))>=7), 'Name terms: '+', '.join(sorted(matched))
+
+def search_queries(name):
+ cleaned=re.sub(r'\b(?:LLC|INC|CORP|CORPORATION)\b\.?','',name,flags=re.I).strip(' ,.')
+ return [f'"{cleaned}" Alabama HVAC', f'"{cleaned}" Alabama Facebook Yelp heating cooling']
+
+def discover_presence(name,license_number):
+ results={};diagnostics={'queries':[],'raw_results':0,'provider_errors':[],'excluded':0,'name_mismatch':0}
+ for query in search_queries(name):
+  try:
+   raw,_=fetch('https://www.bing.com/search?format=rss&q='+urllib.parse.quote(query),150000)
+   entries=ET.fromstring(raw).findall('.//item')[:15]
+   diagnostics['raw_results']+=len(entries)
+   diagnostics['queries'].append({'query':query,'results':len(entries)})
+   for e in entries:
+    url=e.findtext('link','').strip();title=html.unescape(e.findtext('title',''))[:200]
+    category=kind(url)
+    if category=='excluded' or not url.startswith('https://'):
+     diagnostics['excluded']+=1;continue
+    matches,reason=name_support(name,title,url)
+    if not matches:
+     diagnostics['name_mismatch']+=1;continue
+    # A search result is only a candidate, never independently verified.
+    if url not in results:results[url]={'url':url,'title':title,'kind':category,'status':'CANDIDATE','reasons':[reason],'source':'Bing search result'}
+  except Exception as exc:
+   diagnostics['provider_errors'].append(type(exc).__name__)
+ candidates=list(results.values())[:10]
+ websites=[x for x in candidates if x['kind']=='website'][:2]
+ for item in websites:
+  evidence=identity_evidence(name,item['url'])
+  item['identity']=evidence
+  item['status']='REVIEW_REQUIRED' if evidence['status']=='NEEDS_REVIEW' else 'UNCONFIRMED'
+ # Social/directory listing pages are not reliably readable by automated clients.
+ # Keep these as review candidates; never claim verified business identity.
+ for item in candidates:
+  if item['kind']!='website':item['reasons'].append('Search title only; open listing to verify Alabama HVAC identity')
+ reviewed=[x for x in candidates if x['kind']=='website' and x['status']=='REVIEW_REQUIRED']
+ if reviewed:classification='OFFICIAL_WEBSITE_CANDIDATE'
+ elif any(x['kind']=='social' for x in candidates):classification='SOCIAL_MEDIA_CANDIDATE'
+ elif any(x['kind']=='directory' for x in candidates):classification='DIRECTORY_CANDIDATE'
+ else:classification='IDENTITY_UNCONFIRMED'
+ return {'license_number':license_number,'business_name':name,'classification':classification,'presence':candidates,'diagnostics':diagnostics,'verified':False,'notice':'Candidate classification, not independent verification. Review source before importing.'}
