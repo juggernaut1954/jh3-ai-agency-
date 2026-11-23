@@ -356,7 +356,7 @@ async def upload_licenses(file:UploadFile=File(...)):
 
 
 # Research results are evidence-backed and separate from the sales-lead pipeline.
-from research import search_candidates, audit_site
+from research import search_candidates, audit_site, identity_evidence
 
 class LicenseResearchIn(BaseModel):
  license_number:str
@@ -379,6 +379,9 @@ def research_find(data:LicenseResearchIn):
  if not r:raise HTTPException(404,'License not staged')
  if r['status']!='ACTIVE' or r['license_type']!='HVAC' or not r['business_name'].strip():raise HTTPException(409,'Not an active named HVAC license')
  urls,error=search_candidates(r['business_name'])
+ for item in urls:
+  item['identity_check']=identity_evidence(r['business_name'],item['url'])
+  item['match_status']=item['identity_check']['status']
  return {'license_number':data.license_number,'business_name':r['business_name'],'possible_websites':urls,'notice':'Unverified search results. Select only a website that actually belongs to this business.','error':error}
 
 @app.post('/api/research/audit')
@@ -388,13 +391,16 @@ def research_audit(data:LicenseResearchIn):
  if not r:raise HTTPException(404,'License not staged')
  if r['status']!='ACTIVE' or r['license_type']!='HVAC' or not r['business_name'].strip():raise HTTPException(409,'Not an active named HVAC license')
  if not data.website.strip():raise HTTPException(400,'Choose or enter a verified business website')
+ identity=identity_evidence(r['business_name'],data.website.strip())
+ if identity['status']=='REJECTED':raise HTTPException(422,'Website does not match licensed HVAC business: '+'; '.join(identity['reasons'])[:150])
  try:report=audit_site(data.website.strip())
  except Exception as e:raise HTTPException(422,'Website audit unavailable: '+str(e)[:180])
  # Score is a research-priority heuristic, NOT an assertion of poor performance.
  signals=report['signals'];score=25+15*bool(report['phones'])+10*bool(report['emails'])+10*bool(report['contact_links'])+10*bool(report['booking_links'])+10*bool(signals['contact_form'])+10*bool(signals['mobile_viewport'])+10*bool(signals['social_profiles_linked'])
  report['research_completeness_score']=min(100,score)
  report['business_name_from_license']=r['business_name']
- report['identity_match']='UNVERIFIED: operator must confirm website belongs to licensed company'
+ report['identity_match']='NEEDS_REVIEW: human must confirm website belongs to licensed company'
+ report['identity_evidence']=identity
  with connect() as c:
   prev=c.execute('SELECT license_number FROM license_research WHERE license_number=?',(data.license_number,)).fetchone()
   if prev:c.execute('UPDATE license_research SET website=?,checked_at=?,report=? WHERE license_number=?',(report['website'],report['checked_at'],json.dumps(report),data.license_number))

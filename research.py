@@ -27,19 +27,75 @@ def fetch(url,limit=350000):
 def domain(url):
  try:return (urllib.parse.urlparse(url).hostname or '').lower().removeprefix('www.')
  except Exception:return ''
+# Search results are untrusted candidates, never verified business identities.
+STOPWORDS={'llc','inc','corp','corporation','company','co','the','and','of','services','service','heating','cooling','air','conditioning','hvac','mechanical','contractors','contractor','dba'}
+REJECT={'wikipedia.org','albright.edu','albrightsupply.com','albrightinternational.com'}
+def tokens(s):
+ return {x for x in re.findall(r'[a-z0-9]+',html.unescape(s).lower()) if len(x)>2 and x not in STOPWORDS}
+def query_variants(name):
+ clean=html.unescape(name).replace('&amp;','&').strip()
+ alt=re.sub(r'\b(?:LLC|INC|CORP|CORPORATION)\b\.?','',clean,flags=re.I).strip(' ,.')
+ return [f'"{clean}" "Alabama" HVAC',f'"{alt}" heating cooling Alabama',f'{alt} Alabama HVAC official website']
+def candidate_score(name,title,url):
+ host=domain(url)
+ if not host or any(host==b or host.endswith('.'+b) for b in BLOCK|REJECT):return -100,['Excluded directory or unrelated site']
+ name_tokens=tokens(name);found=tokens(title+' '+host.replace('.',' '))
+ overlap=name_tokens & found
+ # Never accept a single shared surname as evidence of company identity.
+ if not overlap:return -100,['No distinctive company-name match']
+ score=15*len(overlap)
+ reasons=['Name tokens matched: '+', '.join(sorted(overlap))]
+ title_lower=title.lower()
+ if re.search(r'heat|cool|hvac|air condition|furnace|mechanical',title_lower+' '+host):score+=25;reasons.append('HVAC industry mentioned')
+ if 'alabama' in title_lower or re.search(r'\b(?:al|birmingham|huntsville|mobile|montgomery|tuscaloosa)\b',title_lower):score+=15;reasons.append('Alabama geography mentioned')
+ if len(overlap)<2 and len(name_tokens)>=2:score-=25;reasons.append('Insufficient company-name overlap')
+ return score,reasons
 def search_candidates(name):
- """Best-effort free public RSS lookup; unavailable is a normal result."""
- query=urllib.parse.quote('"'+name+'" Alabama HVAC heating cooling official website')
+ """Multi-query discovery with conservative rejection; candidates always need identity verification."""
+ out={};errors=[]
+ for query in query_variants(name):
+  try:
+   body,_=fetch('https://www.bing.com/search?format=rss&q='+urllib.parse.quote(query),150000)
+   root=ET.fromstring(body)
+   for item in root.findall('.//item')[:15]:
+    url=item.findtext('link','').strip();title=html.unescape(item.findtext('title',''))[:180]
+    if not url.startswith('https://'):continue
+    score,reasons=candidate_score(name,title,url)
+    if score<30:continue
+    host=domain(url)
+    previous=out.get(host)
+    if previous is None or score>previous['match_score']:
+     out[host]={'url':url,'title':title,'match_score':score,'match_status':'NEEDS_REVIEW','reasons':reasons}
+  except Exception:errors.append('Public search source unavailable for one query')
+ candidates=sorted(out.values(),key=lambda x:-x['match_score'])[:6]
+ return candidates,('Some public searches were unavailable.' if errors else None)
+
+def identity_evidence(name,url):
+ """Fetch homepage and classify cautiously; no automated VERIFIED status."""
+ host=domain(url)
+ if not host or any(host==b or host.endswith('.'+b) for b in BLOCK|REJECT):
+  return {'status':'REJECTED','reasons':['Unrelated or directory domain']}
  try:
-  body,_=fetch('https://www.bing.com/search?format=rss&q='+query,150000)
-  root=ET.fromstring(body)
-  out=[]
-  for item in root.findall('.//item')[:12]:
-   url=item.findtext('link','').strip();host=domain(url)
-   if not url.startswith('https://') or not host or any(host==b or host.endswith('.'+b) for b in BLOCK):continue
-   out.append({'url':url,'title':item.findtext('title','')[:180]})
-  return out[:6],None
- except Exception as e:return [],'Public search unavailable; supply and verify a company website manually.'
+  body,final=fetch(url,250000)
+  if domain(final)!=host:return {'status':'NEEDS_REVIEW','reasons':['Redirected to another domain']}
+  parser=Extract();parser.feed(body)
+  content=' '.join(parser.text)[:60000]
+  content=html.unescape(re.sub(r'\s+',' ',content))
+  hay=(parser.title+' '+content[:12000]).lower()
+  name_tokens=tokens(name)
+  title_tokens=tokens(parser.title+' '+host.replace('.',' '))
+  overlap=name_tokens & title_tokens
+  industry=bool(re.search(r'heat|cool|hvac|air condition|furnace|mechanical|refrigerat',hay))
+  geography=bool(re.search(r'\balabama\b|\bAL\s*\d{5}\b|\bbirmingham\b|\bhuntsville\b|\bmobile,?\s*al\b|\bmontgomery\b',hay,re.I))
+  reasons=[]
+  if overlap:reasons.append('Name matched in page title or domain: '+', '.join(sorted(overlap)))
+  if industry:reasons.append('HVAC-related services mentioned on homepage')
+  if geography:reasons.append('Alabama location signal on homepage')
+  if not industry or not overlap:return {'status':'REJECTED','reasons':reasons+['Missing company-name or HVAC evidence']}
+  return {'status':'NEEDS_REVIEW','reasons':reasons+(['Alabama location not confirmed'] if not geography else [])}
+ except Exception:
+  return {'status':'NEEDS_REVIEW','reasons':['Homepage could not be independently checked']}
+
 def audit_site(url):
  if not url.startswith('https://') and not url.startswith('http://'):raise ValueError('Website must start with http:// or https://')
  p=urllib.parse.urlparse(url)
